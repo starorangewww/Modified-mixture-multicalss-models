@@ -1,0 +1,652 @@
+library(gmm)
+library(gee)
+library(fastDummies)
+library(e1071)
+library(rfUtilities)
+#library(survminer)
+#library(ggpubr)
+library(survival)
+#library(survminer)
+library(nnet)
+library(randomForest)
+library(compositions)
+library(ggplot2)
+
+initial_Lambda.1<-function(Time,Status,X,Z,id,corstr){
+  X<-as.matrix(cbind(1,X))
+  Z<-as.matrix(cbind(1,Z))
+  w <- Status
+  t2 <- Time
+  K <- length(unique(id))
+  n <- as.vector(table(id))
+  Kn <- sum(n)
+  cens <- Status
+  t11 <- sort(Time)
+  c11 <- Status[order(Time)]
+  x111 <- as.matrix(X[order(Time), ])
+  g11 <- w[order(Time)]
+  tt1 <- unique(t11[c11 == 1])
+  kk <- length(table(t11[c11 == 1]))
+  dd <- as.matrix(table(t11[c11 == 1]))
+  gg1 <- Status
+  gg2 <- log(Time)
+  gg1[gg1<1e-06] <- 1e-06
+  gg3 <- log(gg1) + log(Time)
+  #pmt1c <- eval(parse(text = paste("geese", "(", "w~Z[,-1]", ",id=", "id", ",family = binomial", ",corstr='", corstr, "'", ")", sep = "")))$beta
+  pmt1c<-gee(w~Z[,-1],id=id,family=binomial,corstr=corstr)
+  pmt1c<-pmt1c$coefficients
+  #pmt1s <- eval(parse(text = paste("geese", "(", "w~X-1+", "offset(", "gg3", ")", ",id=", "id", ",family = poisson", ",corstr='", corstr, "'", ")", sep = "")))$beta
+  pmt1s<-gee(w~X[,-1],as.data.frame(offset(gg3)),id=id,family=poisson,corstr=corstr)
+  pmt1s<-pmt1s$coefficients
+  ppmt2<-c(pmt1c, pmt1s)
+  KK<-1
+  repeat{
+    gSSS1 <- rep(0, kk)
+    KK1 <- 1
+    repeat{
+      gSS<-rep(0, kk)
+      gSS1<-rep(1, kk)            
+      gSS[1]<-dd[1]/(sum(g11[min((1:(Kn))[t11 == tt1[1]]):(Kn)]*exp(matrix(x111[min((1:(Kn))[t11 == tt1[1]]):(Kn),],ncol=dim(X)[2])%*%matrix(pmt1s,ncol=1))))
+      for (i in 1:(kk-1)){
+        
+        gSS[i+1]<-gSS[i]+dd[i+1]/(sum(g11[min((1:(Kn))[t11==tt1[i+1]]):(Kn)]*exp(matrix(x111[min((1:(Kn))[t11==tt1[i+1]]):(Kn),],ncol=dim(X)[2])%*%matrix(pmt1s,ncol=1))))
+      }
+      gSS1<-exp(-gSS)
+      gSS2<-rep(0, Kn)
+      gSS3<-rep(0, Kn)
+      for(i in 1:Kn){
+        kk1<-1
+        if(t2[i]<tt1[1]){
+          gSS2[i]<-1
+          gSS3[i]<-1e-08
+        }else{
+          if(t2[i]>=tt1[kk]) {
+            gSS2[i]<-0
+            gSS3[i]<-gSS[kk]
+          }else{
+            repeat{
+              if(t2[i]>=tt1[kk1]) 
+                kk1<-kk1+1 else break}
+            {gSS2[i]<-(gSS1[kk1-1])^(exp(X[i,]%*%matrix(pmt1s,ncol=1)))
+              gSS3[i]<-gSS[kk1 - 1]
+            }
+          }
+        }
+      }
+      gg2<-log(gSS3)
+      gg3<-log(gg1)+gg2
+      #ww2 <- eval(parse(text = paste("geese", "(", "w~X-1+", "offset(", "gg3", ")", ",id=", "id", ",family = poisson", ",corstr='", corstr, "'", ")", sep = "")))
+      ww2<-gee(w~X[,-1],as.data.frame(offset(gg3)),id=id,family=poisson,corstr=corstr)
+      
+      if(KK1<100&&(any(abs(ww2$beta-pmt1s)>1e-06)||any(abs(gSS1-gSSS1)>1e-06))){
+        pmt1s<-c(ww2$coefficients)
+        gSSS1<-gSS1
+        KK1 <- KK1 + 1
+      } else {
+        gg1<-Status+((1-Status)*exp(Z%*%matrix(pmt1c,ncol=1))*gSS2)/(1+exp(Z%*%matrix(pmt1c,ncol=1))*gSS2)
+        g11<-gg1[order(t2)]
+        gg1[gg1<1e-06]<-1e-06
+        gg3<-log(gg1)+gg2
+        break
+      }}
+    pmt2c<-gee(w~Z[,-1],id=id,family=binomial,corstr=corstr)
+    pmt2c<-pmt2c$coefficients
+    
+    pmt2s<-gee(w~X[,-1],as.data.frame(offset(gg3)),id=id,family=poisson,corstr=corstr)
+    pmt2s<-pmt2s$coefficients
+    
+    if (any(abs(pmt2c-pmt1c)>1e-03)||max((pmt2s - pmt1s)^2)>1e-03){
+      pmt1c<-pmt2c
+      pmt1s <- pmt2s
+      KK<-KK+1
+    } else break
+  }
+  Lambda<-gSS3
+  list(Lambda = Lambda)
+}
+#=================================
+#class
+moments.g.C1<-function(theta,data){
+  y<-as.matrix(data[,c(6,7)],ncol=1)
+  #Q.c1<-as.matrix(data[,c(4)],ncol=1)
+  Q.c1<-as.matrix(data[,c(4,5)],ncol=1)
+  Q.C1<-cbind(1,Q.c1)
+  #interest status
+  theta.1<-matrix(theta,ncol=1)
+  mu.C1<-exp(Q.C1%*%theta.1)
+  #non-interesting status
+  theta.2<-matrix(Gamma.2,ncol=1)
+  mu.C2<-exp(Q.C1%*%theta.2)
+  #
+  G<-c((y[,1]*(1+mu.C2)/(1+mu.C1+mu.C2))-((y[,2])*(mu.C1)/(1+mu.C1+mu.C2))-((1-y[,1]-y[,2])*(mu.C1)/(1+mu.C1+mu.C2)))*Q.C1
+  return(G)
+}
+moments.g.C2<-function(theta,data){
+  y<-as.matrix(data[,c(6,7)],ncol=1)
+  #Q.c1<-as.matrix(data[,c(4)],ncol=1)
+  Q.c1<-as.matrix(data[,c(4,5)],ncol=1)
+  Q.C1<-cbind(1,Q.c1)
+  #interest status
+  theta.2<-matrix(theta,ncol=1)
+  mu.C2<-exp(Q.C1%*%theta.2)
+  #non-interesting status
+  theta.1<-matrix(Gamma.1,ncol=1)
+  mu.C1<-exp(Q.C1%*%theta.1)
+  #
+  G<-c((y[,2]*(1+mu.C1)/(1+mu.C1+mu.C2))-((y[,1])*(mu.C2)/(1+mu.C1+mu.C2))-((1-y[,1]-y[,2])*(mu.C2)/(1+mu.C1+mu.C2)))*Q.C1
+  return(G)
+}
+#survival
+#--------Survival.1----------
+moments.G1<-function(theta,data){
+  alpha.u1<-alpha.10
+  y<-matrix(data[,1],ncol=1)
+  x<-as.matrix(data[,c(2,3)])
+  #x<-as.matrix(data[,2])
+  Wi<-matrix(data[,6],ncol=1)
+  theta.1<-matrix(theta,ncol=1)
+  status<-data[,8]
+  G<-matrix(0,ncol=1,nrow=dim(data)[1])
+  x.1<-rep(1,dim(data)[1])
+  q.1<-cbind(x.1,x)
+  mu<-q.1%*%theta.1
+  G<-c(status-(exp(mu)*(y)^(alpha.u1)))
+  G.1<-c(Wi)*c(G)
+  G.2<-c(G.1)*q.1
+  return(G.2)
+}
+moments.alpha.1<-function(theta,data){
+  y<-matrix(data[,1],ncol=1)
+  x<-as.matrix(data[,c(2,3)])
+  #x<-as.matrix(data[,2])
+  Wi<-matrix(data[,6],ncol=1)
+  status<-data[,8]
+  x.1<-rep(1,dim(data)[1])
+  q.1<-cbind(x.1,x)
+  G.A<-(log(y)*(Wi*status-Wi*(y^(theta))*exp(q.1%*%Beta.b1))+status/theta)
+  return(G.A)
+}
+#--------Survival.2----------
+moments.G2<-function(theta,data){
+  alpha.u2<-alpha.20
+  y<-matrix(data[,1],ncol=1)
+  x<-as.matrix(data[,c(2,3)])
+  #x<-as.matrix(data[,2])
+  Wi<-matrix(data[,7],ncol=1)
+  theta.1<-matrix(theta,ncol=1)
+  status<-data[,9]
+  G<-matrix(0,ncol=1,nrow=dim(data)[1])
+  x.1<-rep(1,dim(data)[1])
+  q.1<-cbind(x.1,x)
+  mu<-q.1%*%theta.1
+  G<-c(status-(exp(mu)*(y)^(alpha.u2)))
+  G.1<-c(Wi)*c(G)
+  G.2<-c(G.1)*q.1
+  return(G.2)
+}
+moments.alpha.2<-function(theta,data){
+  y<-matrix(data[,1],ncol=1)
+  x<-as.matrix(data[,c(2,3)])
+  #x<-as.matrix(data[,2])
+  Wi<-matrix(data[,7],ncol=1)
+  status<-data[,9]
+  x.1<-rep(1,dim(data)[1])
+  q.1<-cbind(x.1,x)
+  G.A<-(log(y)*(Wi*status-Wi*(y^(theta))*exp(q.1%*%Beta.b2))+status/theta)
+  return(G.A)
+}
+
+###A modified multinomial logistic-Weibull model
+MLM1.11<-multinom(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1)
+#MLM1.11<-multinom(U.SVM.C~Z.G,data=sdata.2.v.1)
+Gamma.10<-Gamma.1<-coef(MLM1.11)[1,]
+Gamma.20<-Gamma.2<-coef(MLM1.11)[2,]
+
+Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+
+Lambda1<-Lambda.1$Lambda
+
+kappa.1<-c(-sum(sdata.2.v.1$S.1)/sum(sdata.2.v.1$C.1*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.1-Lambda1)))
+(alpha.10<-kappa.1)
+
+#
+Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+
+Lambda2<-Lambda.2$Lambda
+kappa.2<-c(-sum(sdata.2.v.1$S.2)/sum(sdata.2.v.1$C.2*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.2-Lambda2)))
+
+(alpha.20<-kappa.2)
+#Beta
+#beta.0
+# Insert initial shape parameters
+my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+(beta.10<-my_gmm.B1$coefficients)
+
+my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+
+(beta.20<-my_gmm.B2$coefficients)
+#=============================
+#EM
+K.1<-0
+para.test.0<-c(beta.10,beta.20,Gamma.10,Gamma.20,alpha.10,alpha.20)
+while(1){
+  Wi.1<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    pi.1<-exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i]))
+    pi.2<-exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i]))
+    #pi.1<-exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]))
+    #pi.2<-exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]))
+    pi.3<-1-pi.1-pi.2
+    sdata.2.v.1[i,8]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.1*(S3.1))/((pi.3*S3.3)+(pi.1*S3.1)+(pi.2*S3.2)))
+  })
+  
+  Wi.2<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only Age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    pi.1<-exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i]))
+    pi.2<-exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i]+Gamma.10[3]*sdata.2.v.1$Z.TS[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]+Gamma.20[3]*sdata.2.v.1$Z.TS[i]))
+    #pi.1<-exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]))
+    #pi.2<-exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i])/(1+exp(Gamma.10[1]+Gamma.10[2]*sdata.2.v.1$Z.G[i])+exp(Gamma.20[1]+Gamma.20[2]*sdata.2.v.1$Z.G[i]))
+    
+    pi.3<-1-pi.1-pi.2
+    sdata.2.v.1[i,9]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.2*S3.2)/((pi.3*S3.3)+(pi.1*S3.1)+(pi.2*S3.2)))
+  })
+  sdata.2.v.1[,c(6,7)]<-cbind(Wi.1,Wi.2)
+  #Class-1
+  my_gmm.G1<-gmm(moments.g.C1,x=sdata.2.v.1,t0=c(Gamma.10),type="iterative",wmatrix = "optimal",
+                 method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (Gamma.new.01<-my_gmm.G1$coefficients)
+  #Class -2
+  my_gmm.G2<-gmm(moments.g.C2,x=sdata.2.v.1,t0=c(Gamma.20),type="iterative",wmatrix = "optimal",
+                 method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (Gamma.new.02<-my_gmm.G2$coefficients)
+  
+  #Survival-1
+  my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (beta.new.01<-my_gmm.5$coefficients)
+  Beta.b1<-matrix(beta.new.01,ncol=1)
+  my_gmm.a1<-gmm(moments.alpha.1,x=sdata.2.v.1,t0=c(alpha.10),optfct=c("nlminb"))
+  (alpha.S1<-my_gmm.a1$coefficients)
+  
+  #Survival -2
+  my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (beta.new.02<-my_gmm.6$coefficients)
+  Beta.b2<-matrix(beta.new.02,ncol=1)
+  my_gmm.a2<-gmm(moments.alpha.2,x=sdata.2.v.1,t0=c(alpha.20),optfct=c("nlminb"))
+  (alpha.S2<-my_gmm.a2$coefficients)
+  para.test<-c(beta.new.01,beta.new.02,Gamma.new.01,Gamma.new.02,alpha.S1,alpha.S2)
+  #coverge
+  #LL.t<-LL(beta=c(beta.new.01,beta.new.02),p1=pi.z11,p2=pi.z22,p3=pi.z33,alpha=c(alpha.S1,alpha.S2),data=sdata.2.v.1)
+  #LL.1<-LL.t$LL
+  #print(beta.new.01)
+  #Diff.1<-max(c(abs(alpha.S1-alpha.10),abs(alpha.S2-alpha.20),abs(beta.10-beta.new.01),abs(beta.20-beta.new.02)))
+  #
+  #if(abs(LL.0-LL.1)<0.01|K.1>100)
+  #  break
+  #LL.0<-LL.1
+  if(max(abs(para.test.0[-c(1,4)]-para.test[-c(1,4)]))<0.01|K.1>100)
+  #if(max(abs(para.test.0[-c(1,3)]-para.test[-c(1,3)]))<0.01|K.1>100)
+    break
+  para.test.0<-para.test
+  Gamma.10<-Gamma.1<-Gamma.new.01
+  Gamma.20<-Gamma.2<-Gamma.new.02
+  beta.10<-beta.new.01
+  beta.20<-beta.new.02
+  alpha.10<-alpha.S1
+  alpha.20<-alpha.S2
+  K.1<-K.1+1
+  print(K.1)
+}
+#
+(GAMMA.1<-Gamma.new.01)
+(GAMMA.2<-Gamma.new.02)
+(Beta1<-beta.new.01)
+(Beta2<-beta.new.02)
+(A1<-alpha.S1)
+(A2<-alpha.S2)
+
+###A modified SVM-Weibull model
+#initial
+#SVM - Class
+
+svm1.11<-svm(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1,kernal="radial",probability=T,type="C-classification")
+#svm1.11<-svm(U.SVM.C~Z.G,data=sdata.2.v.1,kernal="radial",probability=T,type="C-classification")
+
+pred.1 <- predict(svm1.11,sdata.2.v.1,probability = TRUE)
+SVM.p11<-attr(pred.1,"probabilities")
+#
+#initial
+Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+Lambda1<-Lambda.1$Lambda
+
+kappa.1<-c(-sum(sdata.2.v.1$S.1)/sum(sdata.2.v.1$C.1*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.1-Lambda1)))
+(alpha.10<-kappa.1)
+#alpha.10<-0.4
+#
+Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+Lambda2<-Lambda.2$Lambda
+kappa.2<-c(-sum(sdata.2.v.1$S.2)/sum(sdata.2.v.1$C.2*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.2-Lambda2)))
+
+(alpha.20<-kappa.2)
+#alpha.20<-0.4
+#
+pi.z1<-SVM.p11[,colnames(SVM.p11)=="1"]
+pi.z2<-SVM.p11[,colnames(SVM.p11)=="2"]
+pi.z3<-SVM.p11[,colnames(SVM.p11)=="3"]
+#Beta
+#beta.0
+# Insert initial shape parameters
+my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+(beta.10<-my_gmm.B1$coefficients)
+
+my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+
+(beta.20<-my_gmm.B2$coefficients)
+
+#=============================
+#EM
+K.1<-0
+para.test.0<-c(beta.10,beta.20,alpha.10,alpha.20)
+while(1){
+  Wi.1<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only Age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    sdata.2.v.1[i,8]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.z1[i]*(S3.1))/((pi.z3[i]*S3.3)+(pi.z1[i]*S3.1)+(pi.z2[i]*S3.2)))
+  })
+  
+  Wi.2<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only Age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    sdata.2.v.1[i,9]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.z2[i]*(S3.2))/((pi.z3[i]*S3.3)+(pi.z1[i]*S3.1)+(pi.z2[i]*S3.2)))
+  })
+  sdata.2.v.1[,c(6,7)]<-cbind(Wi.1,Wi.2)
+  #==================
+  #SVM - Class
+  SVM.platt.p1<-c()
+  SVM.platt.p2<-c()
+  SVM.platt.p3<-c()
+  for(SAM in 1:5){
+    U.SVM<-sapply(1:(dim(sdata.2.v.1)[1]),function(S){
+      P3<-ifelse(1-c(sdata.2.v.1[S,6]+sdata.2.v.1[S,7])<=0,0,1-c(sdata.2.v.1[S,6]+sdata.2.v.1[S,7]))
+      Y.1.1<-rmultinom(1,1,prob=c(sdata.2.v.1[S,6],sdata.2.v.1[S,7],P3))
+      which(Y.1.1==1)})
+    sdata.2.v.1$U.SVM.C<-U.SVM
+    
+    svm1.11<-svm(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1,kernal="radial",probability=T,type="C-classification")
+    #svm1.11<-svm(U.SVM.C~Z.G,data=sdata.2.v.1,kernal="radial",probability=T,type="C-classification")
+    pred.1 <- predict(svm1.11,sdata.2.v.1,probability = TRUE)
+    SVM.p11<-attr(pred.1,"probabilities")
+    #
+    SVM.platt.p1<-rbind(SVM.platt.p1,SVM.p11[,colnames(SVM.p11)=="1"])
+    SVM.platt.p2<-rbind(SVM.platt.p2,SVM.p11[,colnames(SVM.p11)=="2"])
+    SVM.platt.p3<-rbind(SVM.platt.p3,1-SVM.p11[,colnames(SVM.p11)=="1"]-SVM.p11[,colnames(SVM.p11)=="2"])
+  }
+  pi.z11<-apply(SVM.platt.p1,2,mean)
+  pi.z22<-apply(SVM.platt.p2,2,mean)
+  pi.z33<-apply(SVM.platt.p3,2,mean)
+  #pi.z33<-1-pi.z11-pi.z22
+  for(pro in 1:length(pi.z11)){pi.z33[pro]<-ifelse(pi.z33[pro]<=0,0,pi.z33[pro])}
+  #Survival-1
+  my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  
+  (beta.new.01<-my_gmm.5$coefficients)
+  Beta.b1<-matrix(beta.new.01,ncol=1)
+  my_gmm.a1<-gmm(moments.alpha.1,x=sdata.2.v.1,t0=c(alpha.10),optfct=c("nlminb"))
+  (alpha.S1<-my_gmm.a1$coefficients)
+  
+  #Survival -2
+  my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  
+  (beta.new.02<-my_gmm.6$coefficients)
+  Beta.b2<-matrix(beta.new.02,ncol=1)
+  my_gmm.a2<-gmm(moments.alpha.2,x=sdata.2.v.1,t0=c(alpha.20),optfct=c("nlminb"))
+  (alpha.S2<-my_gmm.a2$coefficients)
+  
+  #coverge
+  #LL.t<-LL(beta=c(beta.new.01,beta.new.02),p1=pi.z11,p2=pi.z22,p3=pi.z33,alpha=c(alpha.S1,alpha.S2),data=sdata.2.v.1)
+  #LL.1<-LL.t$LL
+  #print(beta.new.01)
+  
+  #Diff.1<-max(c(abs(alpha.S1-alpha.10),abs(alpha.S2-alpha.20),abs(beta.10-beta.new.01),abs(beta.20-beta.new.02)))
+  #
+  #if(abs(LL.0-LL.1)<0.01|K.1>100)
+  #  break
+  #LL.0<-LL.1
+  para.test<-c(beta.new.01,beta.new.02,alpha.S1,alpha.S2)
+  if(max(abs(para.test.0[-c(1,4)]-para.test[-c(1,4)]))<0.01|K.1>100)
+  #if(max(abs(para.test.0[-c(1,3)]-para.test[-c(1,3)]))<0.01|K.1>100)
+    break
+  para.test.0<-para.test
+  pi.z1<-pi.z11
+  pi.z2<-pi.z22
+  pi.z3<-pi.z33
+  beta.10<-beta.new.01
+  beta.20<-beta.new.02
+  alpha.10<-alpha.S1
+  alpha.20<-alpha.S2
+  K.1<-K.1+1
+  print(K.1)
+}
+#
+
+(Beta1<-beta.new.01)
+(Beta2<-beta.new.02)
+(A1<-alpha.S1)
+(A2<-alpha.S2)
+#
+(P1.h<-pi.z11)
+(P2.h<-pi.z22)
+(P3.h<-pi.z33)
+
+
+###A modified RF-Weibull model
+#initial
+#RF - Class
+N<-dim(sdata.2.v.1)[1]
+D<-1/2
+RF.11<-randomForest(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1,ntree=300)
+#RF.11<-randomForest(U.SVM.C~Z.G,data=sdata.2.v.1,ntree=300)
+pred.1<-predict(RF.11,sdata.2.v.1,type="prob")
+prdict.MLM.1<-multinom(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1)
+#prdict.MLM.1<-multinom(U.SVM.C~Z.G,data=sdata.2.v.1)
+prdict.MLM<-prdict.MLM.1$fitted.values
+defult.para.data<-prdict.MLM
+defult.para<-fitDirichlet(defult.para.data)
+defult.para.1<-defult.para$alpha
+#
+para.A<-defult.para.1[1]
+para.B<-defult.para.1[2]
+para.C<-defult.para.1[3]
+calib<-cbind(matrix(para.A/(1+(para.A+para.B+para.C)),nrow=N,ncol=1),matrix(para.B/(1+(para.A+para.B+para.C)),nrow=N,ncol=1),matrix(para.C/(1+(para.A+para.B+para.C)),nrow=N,ncol=1))
+pred.11.b<-pred.1*c(1/(1+(para.A+para.B+para.C)))+calib
+pi<-(pred.11.b*D)+(defult.para.data*(1-D))
+pi.0<-pi
+
+#
+#initial
+Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.1<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.1,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+Lambda1<-Lambda.1$Lambda
+
+kappa.1<-c(-sum(sdata.2.v.1$S.1)/sum(sdata.2.v.1$C.1*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.1-Lambda1)))
+(alpha.10<-kappa.1)
+#alpha.10<-0.4
+#
+Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2,3)],Z=sdata.2.v.1[,c(4,5)],corstr="independence")
+#Lambda.2<-initial_Lambda.1(Time=sdata.2.v.1$Surv.T,Status=sdata.2.v.1$S.2,id=c(1:dim(sdata.2.v.1)[1]),X=sdata.2.v.1[,c(2)],Z=sdata.2.v.1[,c(4)],corstr="independence")
+Lambda2<-Lambda.2$Lambda
+kappa.2<-c(-sum(sdata.2.v.1$S.2)/sum(sdata.2.v.1$C.2*log(sdata.2.v.1$Surv.T)*(sdata.2.v.1$S.2-Lambda2)))
+
+(alpha.20<-kappa.2)
+#alpha.20<-0.4
+#
+pi.z1<-pi.0[,colnames(pi.0)=="1"]
+pi.z2<-pi.0[,colnames(pi.0)=="2"]
+pi.z3<-pi.0[,colnames(pi.0)=="3"]
+#Beta
+#beta.0
+# Insert initial shape parameters
+my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B1<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+(beta.10<-my_gmm.B1$coefficients)
+
+my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+#my_gmm.B2<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+(beta.20<-my_gmm.B2$coefficients)
+
+#=============================
+#EM
+K.1<-0
+para.test.0<-c(beta.10,beta.20,alpha.10,alpha.20)
+while(1){
+  Wi.1<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only Age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    #S3.3<-1
+    sdata.2.v.1[i,8]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.z1[i]*(S3.1))/((pi.z3[i]*S3.3)+(pi.z1[i]*S3.1)+(pi.z2[i]*S3.2)))
+  })
+  
+  Wi.2<-sapply(1:dim(sdata.2.v.1)[1],function(i){
+    S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i]+beta.10[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i]+beta.20[3]*sdata.2.v.1$X.TS[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    #Only Age
+    #S3.1<-exp(-exp(beta.10[1]+beta.10[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.10))
+    #S3.2<-exp(-exp(beta.20[1]+beta.20[2]*sdata.2.v.1$X.G[i])*(sdata.2.v.1$Surv.T[i]^alpha.20))
+    S3.3<-exp(-(sdata.2.v.1$Surv.T[i]/(16425)))
+    #S3.3<-1
+    sdata.2.v.1[i,9]+((1-sdata.2.v.1[i,8]-sdata.2.v.1[i,9])*(pi.z2[i]*(S3.2))/((pi.z3[i]*S3.3)+(pi.z1[i]*S3.1)+(pi.z2[i]*S3.2)))
+  })
+  sdata.2.v.1[,c(6,7)]<-cbind(Wi.1,Wi.2)
+  #==================
+  #RF - Class
+  G<-0
+  RF.p1<-c()
+  RF.p2<-c()
+  RF.p3<-c()
+  for(SAM in 1:5){
+    U.SVM<-sapply(1:(dim(sdata.2.v.1)[1]),function(S){
+      P3<-ifelse(1-c(sdata.2.v.1[S,6]+sdata.2.v.1[S,7])<=0,0,1-c(sdata.2.v.1[S,6]+sdata.2.v.1[S,7]))
+      Y.1.1<-rmultinom(1,1,prob=c(sdata.2.v.1[S,6],sdata.2.v.1[S,7],P3))
+      which(Y.1.1==1)})
+    if(length(table(U.SVM))==2){
+      U.SVM[which((1-c(sdata.2.v.1[,6]+sdata.2.v.1[,7]))==max((1-c(sdata.2.v.1[,6]+sdata.2.v.1[,7]))))]<-"3"
+      G<-1
+    }else{
+      U.SVM<-U.SVM
+      G<-0}
+    RF.111<-randomForest(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1,ntree=300) 
+    #RF.111<-randomForest(U.SVM.C~Z.G,data=sdata.2.v.1,ntree=300) 
+    pred.11<-predict(RF.111,sdata.2.v.1,type="prob")
+    
+    
+    sdata.2.v.1$U.SVM.C<-relevel(factor(U.SVM),ref="3")
+    prdict.MLM.1<-multinom(U.SVM.C~Z.G+Z.TS,data=sdata.2.v.1)
+    #prdict.MLM.1<-multinom(U.SVM.C~Z.G,data=sdata.2.v.1)
+    #
+    prdict.MLM<-prdict.MLM.1$fitted.values
+    defult.para.data<-prdict.MLM
+    defult.para<-fitDirichlet(defult.para.data)
+    defult.para.1<-defult.para$alpha
+    #
+    para.A<-defult.para.1[1]
+    para.B<-defult.para.1[2]
+    para.C<-defult.para.1[3]
+    calib<-cbind(matrix(para.A/(1+(para.A+para.B+para.C)),nrow=N,ncol=1),matrix(para.B/(1+(para.A+para.B+para.C)),nrow=N,ncol=1),matrix(para.C/(1+(para.A+para.B+para.C)),nrow=N,ncol=1))
+    pred.11.b<-pred.1*c(1/(1+(para.A+para.B+para.C)))+calib
+    pred.11.1<-(pred.11.b*D)+(defult.para.data*(1-D))
+    #
+    RF.p1<-rbind(RF.p1, pred.11.1[,colnames(pred.11.1)=="1"])
+    RF.p2<-rbind(RF.p2, pred.11.1[,colnames(pred.11.1)=="2"])
+    RF.p3<-rbind(RF.p3, pred.11.1[,colnames(pred.11.1)=="3"])
+  }
+  
+  pi.z11<-apply(RF.p1,2,mean)
+  pi.z22<-apply(RF.p2,2,mean)
+  pi.z33<-apply(RF.p3,2,mean)
+  #pi.z33<-1-pi.z11-pi.z22
+  #for(pro in 1:length(pi.z11)){pi.z33[pro]<-ifelse(pi.z33[pro]<=0,0,pi.z33[pro])}
+  #Survival-1
+  my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.5<-gmm(moments.G1,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (beta.new.01<-my_gmm.5$coefficients)
+  Beta.b1<-matrix(beta.new.01,ncol=1)
+  my_gmm.a1<-gmm(moments.alpha.1,x=sdata.2.v.1,t0=c(alpha.10),optfct=c("nlminb"))
+  (alpha.S1<-my_gmm.a1$coefficients)
+  
+  #Survival -2
+  my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  #my_gmm.6<-gmm(moments.G2,x=sdata.2.v.1,t0=c(0,0),type="iterative",wmatrix = "optimal",method = "Nelder-Mead", control = list(reltol = 1e-25, maxit=20000))
+  (beta.new.02<-my_gmm.6$coefficients)
+  Beta.b2<-matrix(beta.new.02,ncol=1)
+  my_gmm.a2<-gmm(moments.alpha.2,x=sdata.2.v.1,t0=c(alpha.20),optfct=c("nlminb"))
+  (alpha.S2<-my_gmm.a2$coefficients)
+  para.test<-c(beta.new.01,beta.new.02,alpha.S1,alpha.S2)
+  #coverge
+  #LL.t<-LL(beta=c(beta.new.01,beta.new.02),p1=pi.z11,p2=pi.z22,p3=pi.z33,alpha=c(alpha.S1,alpha.S2),data=sdata.2.v.1)
+  #LL.1<-LL.t$LL
+  #print(beta.new.01)
+  #Diff.1<-max(c(abs(alpha.S1-alpha.10),abs(alpha.S2-alpha.20),abs(beta.10-beta.new.01),abs(beta.20-beta.new.02)))
+  #
+  #if(abs(LL.0-LL.1)<0.01|K.1>100)
+  #  break
+  #LL.0<-LL.1
+  #
+  if(max(abs(para.test[-c(1,4)]-para.test.0[-c(1,4)]))<0.01|K.1>100|G==1)
+  #if(max(abs(para.test[-c(1,3)]-para.test.0[-c(1,3)]))<0.01|K.1>100|G==1)
+    break
+  para.test.0<-para.test
+  pi.z1<-pi.z11
+  pi.z2<-pi.z22
+  pi.z3<-pi.z33
+  beta.10<-beta.new.01
+  beta.20<-beta.new.02
+  alpha.10<-alpha.S1
+  alpha.20<-alpha.S2
+  K.1<-K.1+1
+  print(K.1)
+}
+#
+
+(Beta1<-beta.new.01)
+(Beta2<-beta.new.02)
+(A1<-alpha.S1)
+(A2<-alpha.S2)
+#
+(P1.h<-pi.z11)
+(P2.h<-pi.z22)
+(P3.h<-pi.z33)
